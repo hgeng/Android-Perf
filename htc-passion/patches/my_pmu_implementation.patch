@@ -9,10 +9,10 @@ From: Arun (none) <arun@Atlantis>
  2 files changed, 466 insertions(+), 0 deletions(-)
  create mode 100644 fs/proc/pmu.c
 
-Index: cm-kernel_35/fs/proc/Makefile
+Index: cm-kernel-2.6.37.4/fs/proc/Makefile
 ===================================================================
---- cm-kernel_35.orig/fs/proc/Makefile	2011-03-17 17:05:50.000000000 -0700
-+++ cm-kernel_35/fs/proc/Makefile	2011-12-17 00:12:38.573894000 -0800
+--- cm-kernel-2.6.37.4.orig/fs/proc/Makefile	2012-06-25 20:32:00.578430000 -0700
++++ cm-kernel-2.6.37.4/fs/proc/Makefile	2012-06-25 20:34:02.707126000 -0700
 @@ -19,6 +19,7 @@
  proc-y	+= uptime.o
  proc-y	+= version.o
@@ -21,11 +21,11 @@ Index: cm-kernel_35/fs/proc/Makefile
  proc-$(CONFIG_PROC_SYSCTL)	+= proc_sysctl.o
  proc-$(CONFIG_NET)		+= proc_net.o
  proc-$(CONFIG_PROC_KCORE)	+= kcore.o
-Index: cm-kernel_35/fs/proc/pmu.c
+Index: cm-kernel-2.6.37.4/fs/proc/pmu.c
 ===================================================================
 --- /dev/null	1970-01-01 00:00:00.000000000 +0000
-+++ cm-kernel_35/fs/proc/pmu.c	2011-12-18 15:28:06.933893998 -0800
-@@ -0,0 +1,497 @@
++++ cm-kernel-2.6.37.4/fs/proc/pmu.c	2012-06-25 22:12:11.082159000 -0700
+@@ -0,0 +1,536 @@
 +#include <linux/fs.h>
 +#include <linux/init.h>
 +#include <linux/proc_fs.h>
@@ -46,7 +46,6 @@ Index: cm-kernel_35/fs/proc/pmu.c
 +	ARMV7_PERFCTR_PMNC_SW_INCR		= 0x00,
 +	ARMV7_PERFCTR_IFETCH_MISS		= 0x01,
 +	ARMV7_PERFCTR_ITLB_MISS			= 0x02,
-+	ARMV7_PERFCTR_DCACHE_REFILL		= 0x03,
 +	ARMV7_PERFCTR_DCACHE_ACCESS		= 0x04,
 +	ARMV7_PERFCTR_DTLB_REFILL		= 0x05,
 +	ARMV7_PERFCTR_DREAD			= 0x06,
@@ -73,7 +72,7 @@ Index: cm-kernel_35/fs/proc/pmu.c
 +        ARMV7_PERFCTR_L2_STORE_MERGED           = 0x41,
 +        ARMV7_PERFCTR_L2_STORE_BUFF             = 0x42,
 +        ARMV7_PERFCTR_L2_ACCESS                 = 0x43,
-+        ARMV7_PERFCTR_L2_CACH_MISS              = 0x44,
++        ARMV7_PERFCTR_L2_CACHE_MISS             = 0x44,
 +        ARMV7_PERFCTR_AXI_READ_CYCLES           = 0x45,
 +        ARMV7_PERFCTR_AXI_WRITE_CYCLES          = 0x46,
 +        ARMV7_PERFCTR_MEMORY_REPLAY             = 0x47,
@@ -361,43 +360,7 @@ Index: cm-kernel_35/fs/proc/pmu.c
 +    	asm volatile("mcr p15, 0, %0, c9, c14, 0" : : "r" (val | ARMV7_ENABLE_USER_MODE));
 +}
 +
-+static void armv7_pmnc_dump_regs(void)
-+{
-+	u32 val;
-+	unsigned int cnt;
-+
-+	//printk(KERN_INFO "PMNC registers dump:\n");
-+
-+	asm volatile("mrc p15, 0, %0, c9, c12, 0" : "=r" (val));
-+	printk(KERN_INFO "PMNC  =0x%08x\n", val);
-+
-+	/*asm volatile("mrc p15, 0, %0, c9, c12, 1" : "=r" (val));
-+	printk(KERN_INFO "CNTENS=0x%08x\n", val);
-+
-+	asm volatile("mrc p15, 0, %0, c9, c14, 1" : "=r" (val));
-+	printk(KERN_INFO "INTENS=0x%08x\n", val);
-+
-+	asm volatile("mrc p15, 0, %0, c9, c12, 3" : "=r" (val));
-+	printk(KERN_INFO "FLAGS =0x%08x\n", val);
-+
-+	asm volatile("mrc p15, 0, %0, c9, c12, 5" : "=r" (val));
-+	printk(KERN_INFO "SELECT=0x%08x\n", val);
-+
-+	asm volatile("mrc p15, 0, %0, c9, c13, 0" : "=r" (val));
-+	printk(KERN_INFO "CCNT  =0x%08x\n", val);
-+
-+	for (cnt = ARMV7_COUNTER0; cnt < ARMV7_COUNTER_LAST; cnt++) {
-+		armv7_pmnc_select_counter(cnt);
-+		asm volatile("mrc p15, 0, %0, c9, c13, 2" : "=r" (val));
-+		printk(KERN_INFO "CNT[%d] count =0x%08x\n",
-+			cnt-ARMV7_EVENT_CNT_TO_CNTx, val);
-+		asm volatile("mrc p15, 0, %0, c9, c13, 1" : "=r" (val));
-+		printk(KERN_INFO "CNT[%d] evtsel=0x%08x\n",
-+			cnt-ARMV7_EVENT_CNT_TO_CNTx, val);
-+	}*/
-+}
-+
-+void armv7pmu_enable_event(int idx)
++static void armv7pmu_enable_event(int idx, int event)
 +{
 +    	unsigned long flags;
 +
@@ -412,7 +375,7 @@ Index: cm-kernel_35/fs/proc/pmu.c
 +	 * We don't need to set the event if it's a cycle count
 +	 */
 +	if (idx != ARMV7_CYCLE_COUNTER)
-+		armv7_pmnc_write_evtsel(idx, ARMV7_PERFCTR_PMNC_SW_INCR);
++		armv7_pmnc_write_evtsel(idx, event);
 +
 +	/*
 +	 * Enable interrupt for this counter
@@ -465,45 +428,118 @@ Index: cm-kernel_35/fs/proc/pmu.c
 +	armv7_pmnc_write(armv7_pmnc_read() & ~ARMV7_PMNC_E);
 +}
 +
-+static inline int perf_counter_proc_show(struct seq_file *m, void *v)
-+{
-+	unsigned long value = 0;
++unsigned long long ccntr, cntr1, cntr2, cntr3, cntr4;
 +
-+	value = armv7pmu_read_counter(ARMV7_CYCLE_COUNTER);
-+	seq_printf(m, "%lu\n", value);
-+	armv7_pmnc_dump_regs();
++static void armv7pmu_re_enable(void)
++{
++	ccntr += (unsigned long long) armv7pmu_read_counter(ARMV7_CYCLE_COUNTER);
++	cntr1 += (unsigned long long) armv7pmu_read_counter(ARMV7_COUNTER0);
++	cntr2 += (unsigned long long) armv7pmu_read_counter(ARMV7_COUNTER0 + 1);
++	cntr3 += (unsigned long long) armv7pmu_read_counter(ARMV7_COUNTER0 + 2);
++	cntr4 += (unsigned long long) armv7pmu_read_counter(ARMV7_COUNTER0 + 3);
++	armv7pmu_start();
++	armv7pmu_enable_event(ARMV7_CYCLE_COUNTER, 0);
++	armv7pmu_enable_event(ARMV7_COUNTER0, ARMV7_PERFCTR_INSTR_EXECUTED);
++	armv7pmu_enable_event(ARMV7_COUNTER0 + 1, ARMV7_PERFCTR_L2_ACCESS);
++	armv7pmu_enable_event(ARMV7_COUNTER0 + 2, ARMV7_PERFCTR_PC_BRANCH_MIS_PRED);
++	armv7pmu_enable_event(ARMV7_COUNTER0 + 3, ARMV7_PERFCTR_L2_CACHE_MISS);
++}
++
++static inline int ccntr_proc_show(struct seq_file *m, void *v)
++{
++	seq_printf(m, "%llu\n", ccntr);
++	armv7pmu_re_enable();
 +
 +	return 0;
 +}
 +
-+static inline int enable_perf_proc_show(struct seq_file *m, void *v)
++static inline int cntr1_proc_show(struct seq_file *m, void *v)
 +{
-+    	unsigned long value = 0;
++	seq_printf(m, "%llu\n", cntr1);
++	armv7pmu_re_enable();
 +
-+	seq_printf(m, "%lu\n", value);
-+	armv7pmu_start();
-+	armv7pmu_enable_event(ARMV7_CYCLE_COUNTER);
++	return 0;
 +}
 +
-+static inline int perf_counter_proc_open(struct inode *inode, struct file *file)
++static inline int cntr2_proc_show(struct seq_file *m, void *v)
 +{
-+       return single_open(file, perf_counter_proc_show, NULL);
++	seq_printf(m, "%llu\n", cntr2);
++	armv7pmu_re_enable();
++
++	return 0;
 +}
 +
-+static inline int enable_perf_proc_open(struct inode *inode, struct file *file)
++static inline int cntr3_proc_show(struct seq_file *m, void *v)
 +{
-+       return single_open(file, enable_perf_proc_show, NULL);
++	seq_printf(m, "%llu\n", cntr3);
++	armv7pmu_re_enable();
++
++	return 0;
 +}
 +
-+static const struct file_operations perf_counter_proc_fops = {
-+	.open           = perf_counter_proc_open,
++static inline int cntr4_proc_show(struct seq_file *m, void *v)
++{
++	seq_printf(m, "%llu\n", cntr4);
++	armv7pmu_re_enable();
++
++	return 0;
++}
++
++static inline int ccntr_proc_open(struct inode *inode, struct file *file)
++{
++       return single_open(file, ccntr_proc_show, NULL);
++}
++
++static inline int cntr1_proc_open(struct inode *inode, struct file *file)
++{
++       return single_open(file, cntr1_proc_show, NULL);
++}
++
++static inline int cntr2_proc_open(struct inode *inode, struct file *file)
++{
++       return single_open(file, cntr2_proc_show, NULL);
++}
++
++static inline int cntr3_proc_open(struct inode *inode, struct file *file)
++{
++       return single_open(file, cntr3_proc_show, NULL);
++}
++
++static inline int cntr4_proc_open(struct inode *inode, struct file *file)
++{
++       return single_open(file, cntr4_proc_show, NULL);
++}
++
++static const struct file_operations ccntr_proc_fops = {
++	.open           = ccntr_proc_open,
 +	.read           = seq_read,
 +	.llseek         = seq_lseek,
 +	.release        = single_release,
 +};
 +
-+static const struct file_operations enable_perf_proc_fops = {
-+	.open           = enable_perf_proc_open,
++static const struct file_operations cntr1_proc_fops = {
++	.open           = cntr1_proc_open,
++	.read           = seq_read,
++	.llseek         = seq_lseek,
++	.release        = single_release,
++};
++
++static const struct file_operations cntr2_proc_fops = {
++	.open           = cntr2_proc_open,
++	.read           = seq_read,
++	.llseek         = seq_lseek,
++	.release        = single_release,
++};
++
++static const struct file_operations cntr3_proc_fops = {
++	.open           = cntr3_proc_open,
++	.read           = seq_read,
++	.llseek         = seq_lseek,
++	.release        = single_release,
++};
++
++static const struct file_operations cntr4_proc_fops = {
++	.open           = cntr4_proc_open,
 +	.read           = seq_read,
 +	.llseek         = seq_lseek,
 +	.release        = single_release,
@@ -513,10 +549,13 @@ Index: cm-kernel_35/fs/proc/pmu.c
 +{
 +	armv7pmu_start();
 +
-+	proc_create("perf_counter", 0, NULL, &perf_counter_proc_fops);
-+	proc_create("enable_perf", 0, NULL, &enable_perf_proc_fops);
++	proc_create("ccntr", 0, NULL, &ccntr_proc_fops);
++	proc_create("cntr1", 0, NULL, &cntr1_proc_fops);
++	proc_create("cntr2", 0, NULL, &cntr2_proc_fops);
++	proc_create("cntr3", 0, NULL, &cntr3_proc_fops);
++	proc_create("cntr4", 0, NULL, &cntr4_proc_fops);
 +
-+	armv7pmu_enable_event(ARMV7_CYCLE_COUNTER);
++	armv7pmu_re_enable();
 +
 +	return 0;
 +
