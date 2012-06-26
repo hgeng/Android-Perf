@@ -1,0 +1,171 @@
+Index: cm-kernel_35/drivers/staging/android/binder.c
+===================================================================
+--- cm-kernel_35.orig/drivers/staging/android/binder.c	2012-03-19 14:54:39.122004001 -0700
++++ cm-kernel_35/drivers/staging/android/binder.c	2012-04-09 16:48:24.545939000 -0700
+@@ -286,6 +286,7 @@
+ 	struct rb_root refs_by_desc;
+ 	struct rb_root refs_by_node;
+ 	int pid;
++        int bag_id;
+ 	struct vm_area_struct *vma;
+ 	struct task_struct *tsk;
+ 	struct files_struct *files;
+@@ -1391,6 +1392,8 @@
+ 	struct binder_transaction_log_entry *e;
+ 	uint32_t return_error;
+ 
++	//printk(KERN_ALERT "binder_transaction: proc_uid:%d, sender_uid:%d", proc->tsk->attr_uid, t->sender_euid);
++
+ 	e = binder_transaction_log_add(&binder_transaction_log);
+ 	e->call_type = reply ? 2 : !!(tr->flags & TF_ONE_WAY);
+ 	e->from_proc = proc->pid;
+@@ -2533,6 +2536,7 @@
+ 			break;
+ 	}
+ 	if (*p == NULL) {
++                current->bag_id = &proc->bag_id;
+ 		thread = kzalloc(sizeof(*thread), GFP_KERNEL);
+ 		if (thread == NULL)
+ 			return NULL;
+@@ -2629,8 +2633,6 @@
+ 	unsigned int size = _IOC_SIZE(cmd);
+ 	void __user *ubuf = (void __user *)arg;
+ 
+-	/*printk(KERN_INFO "binder_ioctl: %d:%d %x %lx\n", proc->pid, current->pid, cmd, arg);*/
+-
+ 	ret = wait_event_interruptible(binder_user_error_wait, binder_stop_on_user_error < 2);
+ 	if (ret)
+ 		return ret;
+@@ -2641,6 +2643,9 @@
+ 		ret = -ENOMEM;
+ 		goto err;
+ 	}
++        //iprintk(KERN_ALERT "binder_ioctl: current process: %d-%s\n", current->pid, current->comm); 
++
++	//printk(KERN_ALERT "binder_ioctl: Proc:%d-%d, Thread:%d-%d; %lx\n", proc->pid, proc->tsk->attr_uid, thread->pid, thread->proc->tsk->attr_uid, arg);
+ 
+ 	switch (cmd) {
+ 	case BINDER_WRITE_READ: {
+@@ -2649,6 +2654,7 @@
+ 			ret = -EINVAL;
+ 			goto err;
+ 		}
++		//printk(KERN_ALERT "binder: copy_from_user() %d:%d %lx\n", proc->pid, thread->pid, arg);
+ 		if (copy_from_user(&bwr, ubuf, sizeof(bwr))) {
+ 			ret = -EFAULT;
+ 			goto err;
+@@ -2659,6 +2665,7 @@
+ 			     bwr.read_size, bwr.read_buffer);
+ 
+ 		if (bwr.write_size > 0) {
++			//printk(KERN_ALERT "binder: thread_write() %d:%d %lx\n", proc->pid, thread->pid, arg);
+ 			ret = binder_thread_write(proc, thread, (void __user *)bwr.write_buffer, bwr.write_size, &bwr.write_consumed);
+ 			if (ret < 0) {
+ 				bwr.read_consumed = 0;
+@@ -2668,6 +2675,7 @@
+ 			}
+ 		}
+ 		if (bwr.read_size > 0) {
++			//printk(KERN_ALERT "binder: thread_read() %d:%d %lx\n", proc->pid, thread->pid, arg);
+ 			ret = binder_thread_read(proc, thread, (void __user *)bwr.read_buffer, bwr.read_size, &bwr.read_consumed, filp->f_flags & O_NONBLOCK);
+ 			if (!list_empty(&proc->todo))
+ 				wake_up_interruptible(&proc->wait);
+@@ -2677,6 +2685,7 @@
+ 				goto err;
+ 			}
+ 		}
++		//printk(KERN_ALERT "binder: thread_write_read() done %d:%d %lx\n", proc->pid, thread->pid, arg);
+ 		binder_debug(BINDER_DEBUG_READ_WRITE,
+ 			     "binder: %d:%d wrote %ld of %ld, read return %ld of %ld\n",
+ 			     proc->pid, thread->pid, bwr.write_consumed, bwr.write_size,
+@@ -2873,6 +2882,7 @@
+ static int binder_open(struct inode *nodp, struct file *filp)
+ {
+ 	struct binder_proc *proc;
++	printk(KERN_ALERT "binder_open: current:%d-%s UID:%d\n", current->pid, current->comm, filp->f_cred->uid);
+ 
+ 	binder_debug(BINDER_DEBUG_OPEN_CLOSE, "binder_open: %d:%d\n",
+ 		     current->group_leader->pid, current->pid);
+@@ -2889,6 +2899,7 @@
+ 	binder_stats_created(BINDER_STAT_PROC);
+ 	hlist_add_head(&proc->proc_node, &binder_procs);
+ 	proc->pid = current->group_leader->pid;
++        proc->bag_id = filp->f_cred->uid;
+ 	INIT_LIST_HEAD(&proc->delivered_death);
+ 	filp->private_data = proc;
+ 	mutex_unlock(&binder_lock);
+Index: cm-kernel_35/include/linux/sched.h
+===================================================================
+--- cm-kernel_35.orig/include/linux/sched.h	2012-03-23 13:45:20.130004000 -0700
++++ cm-kernel_35/include/linux/sched.h	2012-04-16 11:43:26.668354047 -0700
+@@ -1515,6 +1515,8 @@
+ 		unsigned long memsw_bytes; /* uncharged mem+swap usage */
+ 	} memcg_batch;
+ #endif
++        int *bag_id;
++        unsigned long long wifi;
+ };
+ 
+ /* Future-safe accessor for struct task_struct's cpus_allowed. */
+Index: cm-kernel_35/kernel/sched_stats.h
+===================================================================
+--- cm-kernel_35.orig/kernel/sched_stats.h	2012-03-26 11:26:43.770004001 -0700
++++ cm-kernel_35/kernel/sched_stats.h	2012-04-16 12:07:48.932354047 -0700
+@@ -242,6 +242,7 @@
+ unsigned long *log_3g_in, *log_3g_out;
+ unsigned log_frequency;
+ int log_voltage;
++unsigned long long previous_wifi;
+ 
+ static void sched_switch_tracepoint(struct task_struct *prev, struct task_struct *next)
+ {
+@@ -253,6 +254,7 @@
+ 	user = get_current_user();
+ 	wifiInOctet = get_inoctet_netstat();
+ 	wifiOutOctet = get_outoctet_netstat();
++        prev->wifi += wifiInOctet + wifiOutOctet - previous_wifi;
+ 	if (log_3g_in)
+ 		dataIn = *log_3g_in;
+ 	if (log_3g_out)
+@@ -265,11 +267,14 @@
+     	cntr3 += armv7pmu_read_counter(4);
+    	cntr4 += armv7pmu_read_counter(5);
+ 
++        if (!prev->bag_id)
++                prev->bag_id = &user->uid;
++
+ 	if (next->pid == 0)
+ 		return;
+ 
+-	trace_printk("%d,%s,%d,%llu,%lu,%llu,%llu,%lu,%lu,%d,%u,%d,%lu,%lu,%lu,%lu,%lu\n",
+-		user->uid,
++	trace_printk("%d,%d,%s,%d,%llu,%lu,%llu,%llu,%llu,%lu,%lu,%d,%u,%d,%lu,%lu,%lu,%lu,%lu\n",
++		user->uid, *prev->bag_id,
+ 		prev->comm,
+ 		prev->pid,
+ 		/*prev->state ?
+@@ -280,9 +285,10 @@
+ 		kstat_cpu(0).cpustat.user + kstat_cpu(0).cpustat.nice +
+ 		kstat_cpu(0).cpustat.system + kstat_cpu(0).cpustat.idle,
+ 		prev->utime + prev->stime,
+-		wifiInOctet, wifiOutOctet, dataIn, dataOut,
++		wifiInOctet, wifiOutOctet, prev->wifi, dataIn, dataOut,
+ 		brightness,log_frequency,log_voltage,
+ 		ccntr,cntr1,cntr2,cntr3,cntr4);
++                previous_wifi = wifiInOctet + wifiOutOctet;
+ }
+ 
+ /*
+Index: cm-kernel_35/kernel/trace/trace.c
+===================================================================
+--- cm-kernel_35.orig/kernel/trace/trace.c	2012-03-26 11:25:39.930004000 -0700
++++ cm-kernel_35/kernel/trace/trace.c	2012-04-16 11:43:23.964354047 -0700
+@@ -1757,7 +1757,7 @@
+ 
+ static void print_func_help_header(struct seq_file *m)
+ {
+-	seq_puts(m, "# TIMESTAMP, FUNCTION, UID, TASK, PID, CPUTIME, PROCESS-TIME, WIFI-IN(BYTES), WIFI-OUT(BYTES), 3G-IN(BYTES), 3G-OUT(BYTES), BRIGHTNESS, FREQUENCY, VDD, CCNTR, CNTR1, CNTR2, CNTR3, CNTR4 \n");
++	seq_puts(m, "# TIMESTAMP, FUNCTION, UID, ATTR-UID, TASK, PID, CPUTIME, PROCESS-TIME, WIFI-IN(BYTES), WIFI-OUT(BYTES), WIFI, 3G-IN(BYTES), 3G-OUT(BYTES), BRIGHTNESS, FREQUENCY, VDD, CCNTR, CNTR1, CNTR2, CNTR3, CNTR4 \n");
+ }
+ 
+ 

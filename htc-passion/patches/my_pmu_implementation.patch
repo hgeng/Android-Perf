@@ -1,0 +1,525 @@
+
+
+From: Arun (none) <arun@Atlantis>
+
+
+---
+ fs/proc/Makefile |    1 
+ fs/proc/pmu.c    |  465 ++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 466 insertions(+), 0 deletions(-)
+ create mode 100644 fs/proc/pmu.c
+
+Index: cm-kernel_35/fs/proc/Makefile
+===================================================================
+--- cm-kernel_35.orig/fs/proc/Makefile	2011-03-17 17:05:50.000000000 -0700
++++ cm-kernel_35/fs/proc/Makefile	2011-12-17 00:12:38.573894000 -0800
+@@ -19,6 +19,7 @@
+ proc-y	+= uptime.o
+ proc-y	+= version.o
+ proc-y	+= softirqs.o
++proc-y	+= pmu.o
+ proc-$(CONFIG_PROC_SYSCTL)	+= proc_sysctl.o
+ proc-$(CONFIG_NET)		+= proc_net.o
+ proc-$(CONFIG_PROC_KCORE)	+= kcore.o
+Index: cm-kernel_35/fs/proc/pmu.c
+===================================================================
+--- /dev/null	1970-01-01 00:00:00.000000000 +0000
++++ cm-kernel_35/fs/proc/pmu.c	2011-12-18 15:28:06.933893998 -0800
+@@ -0,0 +1,497 @@
++#include <linux/fs.h>
++#include <linux/init.h>
++#include <linux/proc_fs.h>
++#include <linux/seq_file.h>
++
++DEFINE_SPINLOCK(pmu_lock);
++
++/*
++ * Perf Events counters
++ */
++enum armv7_counters {
++	ARMV7_CYCLE_COUNTER 		= 1,	/* Cycle counter */
++	ARMV7_COUNTER0			= 2,	/* First event counter */
++};
++
++/* Common ARMv7 event types */
++enum armv7_perf_types {
++	ARMV7_PERFCTR_PMNC_SW_INCR		= 0x00,
++	ARMV7_PERFCTR_IFETCH_MISS		= 0x01,
++	ARMV7_PERFCTR_ITLB_MISS			= 0x02,
++	ARMV7_PERFCTR_DCACHE_REFILL		= 0x03,
++	ARMV7_PERFCTR_DCACHE_ACCESS		= 0x04,
++	ARMV7_PERFCTR_DTLB_REFILL		= 0x05,
++	ARMV7_PERFCTR_DREAD			= 0x06,
++	ARMV7_PERFCTR_DWRITE			= 0x07,
++	ARMV7_PERFCTR_INSTR_EXECUTED            = 0x08,
++	ARMV7_PERFCTR_EXC_TAKEN			= 0x09,
++	ARMV7_PERFCTR_EXC_EXECUTED		= 0x0A,
++	ARMV7_PERFCTR_CID_WRITE			= 0x0B,
++	/* ARMV7_PERFCTR_PC_WRITE is equivalent to HW_BRANCH_INSTRUCTIONS.
++	 * It counts:
++	 *  - all branch instructions,
++	 *  - instructions that explicitly write the PC,
++	 *  - exception generating instructions.
++	 */
++	ARMV7_PERFCTR_PC_WRITE			= 0x0C,
++	ARMV7_PERFCTR_PC_IMM_BRANCH		= 0x0D,
++	ARMV7_PERFCTR_UNALIGNED_ACCESS		= 0x0F,
++	ARMV7_PERFCTR_PC_BRANCH_MIS_PRED	= 0x10,
++	ARMV7_PERFCTR_CLOCK_CYCLES		= 0x11,
++
++	ARMV7_PERFCTR_PC_BRANCH_MIS_USED	= 0x12,
++
++        ARMV7_PERFCTR_WRITE_BUFFER_FULL         = 0x40,
++        ARMV7_PERFCTR_L2_STORE_MERGED           = 0x41,
++        ARMV7_PERFCTR_L2_STORE_BUFF             = 0x42,
++        ARMV7_PERFCTR_L2_ACCESS                 = 0x43,
++        ARMV7_PERFCTR_L2_CACH_MISS              = 0x44,
++        ARMV7_PERFCTR_AXI_READ_CYCLES           = 0x45,
++        ARMV7_PERFCTR_AXI_WRITE_CYCLES          = 0x46,
++        ARMV7_PERFCTR_MEMORY_REPLAY             = 0x47,
++        ARMV7_PERFCTR_UNALIGNED_ACCESS_REPLAY   = 0x48,
++        ARMV7_PERFCTR_L1_DATA_MISS              = 0x49,
++        ARMV7_PERFCTR_L1_INST_MISS              = 0x4A,
++        ARMV7_PERFCTR_L1_DATA_COLORING          = 0x4B,
++        ARMV7_PERFCTR_L1_NEON_DATA              = 0x4C,
++        ARMV7_PERFCTR_L1_NEON_CACH_DATA         = 0x4D,
++        ARMV7_PERFCTR_L2_NEON                   = 0x4E,
++        ARMV7_PERFCTR_L2_NEON_HIT               = 0x4F,
++        ARMV7_PERFCTR_L1_INST                   = 0x50,
++        ARMV7_PERFCTR_PC_RETURN_MIS_PRED        = 0x51,
++        ARMV7_PERFCTR_PC_BRANCH_FAILED          = 0x52,
++        ARMV7_PERFCTR_PC_BRANCH_TAKEN           = 0x53,
++        ARMV7_PERFCTR_PC_BRANCH_EXECUTED        = 0x54,
++        ARMV7_PERFCTR_OP_EXECUTED               = 0x55,
++        ARMV7_PERFCTR_CYCLES_INST_STALL         = 0x56,
++        ARMV7_PERFCTR_CYCLES_INST               = 0x57,
++        ARMV7_PERFCTR_CYCLES_NEON_DATA_STALL    = 0x58,
++        ARMV7_PERFCTR_CYCLES_NEON_INST_STALL    = 0x59,
++        ARMV7_PERFCTR_NEON_CYCLES               = 0x5A,
++
++        ARMV7_PERFCTR_PMU0_EVENTS               = 0x70,
++        ARMV7_PERFCTR_PMU1_EVENTS               = 0x71,
++        ARMV7_PERFCTR_PMU_EVENTS                = 0x72,
++
++	ARMV7_PERFCTR_CPU_CYCLES		= 0xFF
++};
++
++/*
++ * The cycle counter is ARMV7_CYCLE_COUNTER.
++ * The first event counter is ARMV7_COUNTER0.
++ * The last event counter is (ARMV7_COUNTER0 + armpmu->num_events - 1).
++ */
++#define	ARMV7_COUNTER_LAST	(0x18 - 1)
++
++/*
++ * ARMv7 low level PMNC access
++ */
++
++/*
++ * Per-CPU PMNC: config reg
++ */
++#define ARMV7_PMNC_E		(1 << 0) /* Enable all counters */
++#define ARMV7_PMNC_P		(1 << 1) /* Reset all counters */
++#define ARMV7_PMNC_C		(1 << 2) /* Cycle counter reset */
++#define ARMV7_PMNC_D		(1 << 3) /* CCNT counts every 64th cpu cycle */
++#define ARMV7_PMNC_X		(1 << 4) /* Export to ETM */
++#define ARMV7_PMNC_DP		(1 << 5) /* Disable CCNT if non-invasive debug*/
++#define	ARMV7_PMNC_N_SHIFT	11	 /* Number of counters supported */
++#define	ARMV7_PMNC_N_MASK	0x1f
++#define	ARMV7_PMNC_MASK		0x3f	 /* Mask for writable bits */
++
++/*
++ * Available counters
++ */
++#define ARMV7_CNT0 		0	/* First event counter */
++#define ARMV7_CCNT 		31	/* Cycle counter */
++
++/* Perf Event to low level counters mapping */
++#define ARMV7_EVENT_CNT_TO_CNTx	(ARMV7_COUNTER0 - ARMV7_CNT0)
++
++/*
++ * CNTENS: counters enable reg
++ */
++#define ARMV7_CNTENS_P(idx)	(1 << (idx - ARMV7_EVENT_CNT_TO_CNTx))
++#define ARMV7_CNTENS_C		(1 << ARMV7_CCNT)
++
++/*
++ * CNTENC: counters disable reg
++ */
++#define ARMV7_CNTENC_P(idx)	(1 << (idx - ARMV7_EVENT_CNT_TO_CNTx))
++#define ARMV7_CNTENC_C		(1 << ARMV7_CCNT)
++
++/*
++ * INTENS: counters overflow interrupt enable reg
++ */
++#define ARMV7_INTENS_P(idx)	(1 << (idx - ARMV7_EVENT_CNT_TO_CNTx))
++#define ARMV7_INTENS_C		(1 << ARMV7_CCNT)
++
++/*
++ * INTENC: counters overflow interrupt disable reg
++ */
++#define ARMV7_INTENC_P(idx)	(1 << (idx - ARMV7_EVENT_CNT_TO_CNTx))
++#define ARMV7_INTENC_C		(1 << ARMV7_CCNT)
++
++/*
++ * EVTSEL: Event selection reg
++ */
++#define	ARMV7_EVTSEL_MASK	0xff		/* Mask for writable bits */
++
++/*
++ * SELECT: Counter selection reg
++ */
++#define	ARMV7_SELECT_MASK	0x1f		/* Mask for writable bits */
++
++/*
++ * FLAG: counters overflow flag status reg
++ */
++#define ARMV7_FLAG_P(idx)	(1 << (idx - ARMV7_EVENT_CNT_TO_CNTx))
++#define ARMV7_FLAG_C		(1 << ARMV7_CCNT)
++#define	ARMV7_FLAG_MASK		0xffffffff	/* Mask for writable bits */
++#define	ARMV7_OVERFLOWED_MASK	ARMV7_FLAG_MASK
++#define ARMV7_ENABLE_USER_MODE	0x01
++
++static inline unsigned long armv7_pmnc_read(void)
++{
++	u32 val;
++	asm volatile("mrc p15, 0, %0, c9, c12, 0" : "=r"(val));
++	return val;
++}
++
++static inline void armv7_pmnc_write(unsigned long val)
++{
++	val &= ARMV7_PMNC_MASK;
++	asm volatile("mcr p15, 0, %0, c9, c12, 0" : : "r"(val));
++}
++
++/*static inline int armv7_pmnc_has_overflowed(unsigned long pmnc)
++{
++	return pmnc & ARMV7_OVERFLOWED_MASK;
++}*/
++
++/*static inline int armv7_pmnc_counter_has_overflowed(unsigned long pmnc,
++					enum armv7_counters counter)
++{
++	int ret = 0;
++
++	if (counter == ARMV7_CYCLE_COUNTER)
++		ret = pmnc & ARMV7_FLAG_C;
++	else if ((counter >= ARMV7_COUNTER0) && (counter <= ARMV7_COUNTER_LAST))
++		ret = pmnc & ARMV7_FLAG_P(counter);
++	else
++		pr_err("CPU%u checking wrong counter %d overflow status\n",
++			smp_processor_id(), counter);
++
++	return ret;
++}*/
++
++static inline int armv7_pmnc_select_counter(unsigned int idx)
++{
++	u32 val;
++
++	if ((idx < ARMV7_COUNTER0) || (idx > ARMV7_COUNTER_LAST)) {
++		pr_err("CPU%u selecting wrong PMNC counter"
++			" %d\n", smp_processor_id(), idx);
++		return -1;
++	}
++
++	val = (idx - ARMV7_EVENT_CNT_TO_CNTx) & ARMV7_SELECT_MASK;
++	asm volatile("mcr p15, 0, %0, c9, c12, 5" : : "r" (val));
++
++	return idx;
++}
++
++static inline u32 armv7pmu_read_counter(int idx)
++{
++	unsigned long value = 0;
++
++	if (idx == ARMV7_CYCLE_COUNTER)
++		asm volatile("mrc p15, 0, %0, c9, c13, 0" : "=r" (value));
++	else if ((idx >= ARMV7_COUNTER0) && (idx <= ARMV7_COUNTER_LAST)) {
++		if (armv7_pmnc_select_counter(idx) == idx)
++			asm volatile("mrc p15, 0, %0, c9, c13, 2"
++				     : "=r" (value));
++	} else
++		pr_err("CPU%u reading wrong counter %d\n",
++			smp_processor_id(), idx);
++
++	return value;
++}
++
++static inline void armv7pmu_write_counter(int idx, u32 value)
++{
++	if (idx == ARMV7_CYCLE_COUNTER)
++		asm volatile("mcr p15, 0, %0, c9, c13, 0" : : "r" (value));
++	else if ((idx >= ARMV7_COUNTER0) && (idx <= ARMV7_COUNTER_LAST)) {
++		if (armv7_pmnc_select_counter(idx) == idx)
++			asm volatile("mcr p15, 0, %0, c9, c13, 2"
++				     : : "r" (value));
++	} else
++		pr_err("CPU%u writing wrong counter %d\n",
++			smp_processor_id(), idx);
++}
++
++static inline void armv7_pmnc_write_evtsel(unsigned int idx, u32 val)
++{
++	if (armv7_pmnc_select_counter(idx) == idx) {
++		val &= ARMV7_EVTSEL_MASK;
++		asm volatile("mcr p15, 0, %0, c9, c13, 1" : : "r" (val));
++	}
++}
++
++static inline u32 armv7_pmnc_enable_counter(unsigned int idx)
++{
++	u32 val;
++
++	if ((idx != ARMV7_CYCLE_COUNTER) &&
++	    ((idx < ARMV7_COUNTER0) || (idx > ARMV7_COUNTER_LAST))) {
++		pr_err("CPU%u enabling wrong PMNC counter"
++			" %d\n", smp_processor_id(), idx);
++		return -1;
++	}
++
++	if (idx == ARMV7_CYCLE_COUNTER)
++		val = ARMV7_CNTENS_C;
++	else
++		val = ARMV7_CNTENS_P(idx);
++
++	asm volatile("mcr p15, 0, %0, c9, c12, 1" : : "r" (val));
++
++	return idx;
++}
++
++static inline u32 armv7_pmnc_disable_counter(unsigned int idx)
++{
++	u32 val;
++
++
++	if ((idx != ARMV7_CYCLE_COUNTER) &&
++	    ((idx < ARMV7_COUNTER0) || (idx > ARMV7_COUNTER_LAST))) {
++		pr_err("CPU%u disabling wrong PMNC counter"
++			" %d\n", smp_processor_id(), idx);
++		return -1;
++	}
++
++	if (idx == ARMV7_CYCLE_COUNTER)
++		val = ARMV7_CNTENC_C;
++	else
++		val = ARMV7_CNTENC_P(idx);
++
++	asm volatile("mcr p15, 0, %0, c9, c12, 2" : : "r" (val));
++
++	return idx;
++}
++
++static inline u32 armv7_pmnc_enable_intens(unsigned int idx)
++{
++	u32 val;
++
++	if ((idx != ARMV7_CYCLE_COUNTER) &&
++	    ((idx < ARMV7_COUNTER0) || (idx > ARMV7_COUNTER_LAST))) {
++		pr_err("CPU%u enabling wrong PMNC counter"
++			" interrupt enable %d\n", smp_processor_id(), idx);
++		return -1;
++	}
++
++	if (idx == ARMV7_CYCLE_COUNTER)
++		val = ARMV7_INTENS_C;
++	else
++		val = ARMV7_INTENS_P(idx);
++
++	asm volatile("mcr p15, 0, %0, c9, c14, 1" : : "r" (val));
++
++	return idx;
++}
++
++static inline u32 armv7_pmnc_disable_intens(unsigned int idx)
++{
++	u32 val;
++
++	if ((idx != ARMV7_CYCLE_COUNTER) &&
++	    ((idx < ARMV7_COUNTER0) || (idx > ARMV7_COUNTER_LAST))) {
++		pr_err("CPU%u disabling wrong PMNC counter"
++			" interrupt enable %d\n", smp_processor_id(), idx);
++		return -1;
++	}
++
++	if (idx == ARMV7_CYCLE_COUNTER)
++		val = ARMV7_INTENC_C;
++	else
++		val = ARMV7_INTENC_P(idx);
++
++	asm volatile("mcr p15, 0, %0, c9, c14, 2" : : "r" (val));
++
++	return idx;
++}
++
++static inline void armv7_enable_user_mode(void)
++{
++    	u32 val;
++	asm volatile("mrc p15, 0, %0, c9, c14, 0" : : "r" (val));
++
++    	asm volatile("mcr p15, 0, %0, c9, c14, 0" : : "r" (val | ARMV7_ENABLE_USER_MODE));
++}
++
++static void armv7_pmnc_dump_regs(void)
++{
++	u32 val;
++	unsigned int cnt;
++
++	//printk(KERN_INFO "PMNC registers dump:\n");
++
++	asm volatile("mrc p15, 0, %0, c9, c12, 0" : "=r" (val));
++	printk(KERN_INFO "PMNC  =0x%08x\n", val);
++
++	/*asm volatile("mrc p15, 0, %0, c9, c12, 1" : "=r" (val));
++	printk(KERN_INFO "CNTENS=0x%08x\n", val);
++
++	asm volatile("mrc p15, 0, %0, c9, c14, 1" : "=r" (val));
++	printk(KERN_INFO "INTENS=0x%08x\n", val);
++
++	asm volatile("mrc p15, 0, %0, c9, c12, 3" : "=r" (val));
++	printk(KERN_INFO "FLAGS =0x%08x\n", val);
++
++	asm volatile("mrc p15, 0, %0, c9, c12, 5" : "=r" (val));
++	printk(KERN_INFO "SELECT=0x%08x\n", val);
++
++	asm volatile("mrc p15, 0, %0, c9, c13, 0" : "=r" (val));
++	printk(KERN_INFO "CCNT  =0x%08x\n", val);
++
++	for (cnt = ARMV7_COUNTER0; cnt < ARMV7_COUNTER_LAST; cnt++) {
++		armv7_pmnc_select_counter(cnt);
++		asm volatile("mrc p15, 0, %0, c9, c13, 2" : "=r" (val));
++		printk(KERN_INFO "CNT[%d] count =0x%08x\n",
++			cnt-ARMV7_EVENT_CNT_TO_CNTx, val);
++		asm volatile("mrc p15, 0, %0, c9, c13, 1" : "=r" (val));
++		printk(KERN_INFO "CNT[%d] evtsel=0x%08x\n",
++			cnt-ARMV7_EVENT_CNT_TO_CNTx, val);
++	}*/
++}
++
++void armv7pmu_enable_event(int idx)
++{
++    	unsigned long flags;
++
++	spin_lock_irqsave(&pmu_lock, flags);
++	/*
++	 * Disable counter
++	 */
++	armv7_pmnc_disable_counter(idx);
++
++	/*
++	 * Set event (if destined for PMNx counters)
++	 * We don't need to set the event if it's a cycle count
++	 */
++	if (idx != ARMV7_CYCLE_COUNTER)
++		armv7_pmnc_write_evtsel(idx, ARMV7_PERFCTR_PMNC_SW_INCR);
++
++	/*
++	 * Enable interrupt for this counter
++	 */
++	armv7_pmnc_enable_intens(idx);
++
++	/*
++	 * Enable counter
++	 */
++	armv7_pmnc_enable_counter(idx);
++	spin_unlock_irqrestore(&pmu_lock, flags);
++}
++
++static void armv7pmu_disable_event(int idx)
++{
++    	unsigned long flags;
++
++	spin_lock_irqsave(&pmu_lock, flags);
++	/*
++	 * Disable counter
++	 */
++	armv7_pmnc_disable_counter(idx);
++
++	/*
++	 * Disable interrupt for this counter
++	 */
++	armv7_pmnc_disable_intens(idx);
++
++	spin_unlock_irqrestore(&pmu_lock, flags);
++}
++
++static void armv7pmu_start(void)
++{
++    	unsigned long flags;
++
++	/* Initialize & Reset PMNC: C and P bits */
++	armv7_pmnc_write(ARMV7_PMNC_P | ARMV7_PMNC_C | ARMV7_PMNC_D);
++
++	spin_lock_irqsave(&pmu_lock, flags);    	
++	/* Enable all counters */
++	armv7_pmnc_write(armv7_pmnc_read() | ARMV7_PMNC_E);
++	spin_unlock_irqrestore(&pmu_lock, flags);
++
++	//armv7_enable_user_mode();
++}	
++
++static void armv7pmu_stop(void)
++{
++	/* Disable all counters */
++	armv7_pmnc_write(armv7_pmnc_read() & ~ARMV7_PMNC_E);
++}
++
++static inline int perf_counter_proc_show(struct seq_file *m, void *v)
++{
++	unsigned long value = 0;
++
++	value = armv7pmu_read_counter(ARMV7_CYCLE_COUNTER);
++	seq_printf(m, "%lu\n", value);
++	armv7_pmnc_dump_regs();
++
++	return 0;
++}
++
++static inline int enable_perf_proc_show(struct seq_file *m, void *v)
++{
++    	unsigned long value = 0;
++
++	seq_printf(m, "%lu\n", value);
++	armv7pmu_start();
++	armv7pmu_enable_event(ARMV7_CYCLE_COUNTER);
++}
++
++static inline int perf_counter_proc_open(struct inode *inode, struct file *file)
++{
++       return single_open(file, perf_counter_proc_show, NULL);
++}
++
++static inline int enable_perf_proc_open(struct inode *inode, struct file *file)
++{
++       return single_open(file, enable_perf_proc_show, NULL);
++}
++
++static const struct file_operations perf_counter_proc_fops = {
++	.open           = perf_counter_proc_open,
++	.read           = seq_read,
++	.llseek         = seq_lseek,
++	.release        = single_release,
++};
++
++static const struct file_operations enable_perf_proc_fops = {
++	.open           = enable_perf_proc_open,
++	.read           = seq_read,
++	.llseek         = seq_lseek,
++	.release        = single_release,
++};
++
++static int __init armv7_init_pmnc(void)
++{
++	armv7pmu_start();
++
++	proc_create("perf_counter", 0, NULL, &perf_counter_proc_fops);
++	proc_create("enable_perf", 0, NULL, &enable_perf_proc_fops);
++
++	armv7pmu_enable_event(ARMV7_CYCLE_COUNTER);
++
++	return 0;
++
++}
++
++module_init(armv7_init_pmnc);
