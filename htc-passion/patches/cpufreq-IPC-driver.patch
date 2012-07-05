@@ -1,0 +1,72 @@
+Index: cm-kernel-2.6.37.4/drivers/cpufreq/cpufreq_ipc.c
+===================================================================
+--- /dev/null	1970-01-01 00:00:00.000000000 +0000
++++ cm-kernel-2.6.37.4/drivers/cpufreq/cpufreq_ipc.c	2012-07-04 23:00:11.270176000 -0700
+@@ -0,0 +1,41 @@
++/*
++ * CPUFreq Governer which takes frequency scaling
++ * decisions based on hardware counters.
++ */
++
++#include <linux/kernel.h>
++#include <linux/module.h>
++#include <linux/cpufreq.h>
++#include <linux/init.h>
++
++
++static int cpufreq_governor_ipc(struct cpufreq_policy *policy,
++					unsigned int event)
++{
++	return 0;
++}
++
++struct cpufreq_governor cpufreq_gov_ipc = {
++	.name		= "IPC",
++	.governor	= cpufreq_governor_ipc,
++	.owner		= THIS_MODULE,
++};
++
++
++static int __init cpufreq_gov_ipc_init(void)
++{
++	return cpufreq_register_governor(&cpufreq_gov_ipc);
++}
++
++
++static void __exit cpufreq_gov_ipc_exit(void)
++{
++	cpufreq_unregister_governor(&cpufreq_gov_ipc);
++}
++
++
++MODULE_DESCRIPTION("CPUfreq policy governor 'IPC'");
++MODULE_LICENSE("GPL");
++
++fs_initcall(cpufreq_gov_ipc_init);
++module_exit(cpufreq_gov_ipc_exit);
+Index: cm-kernel-2.6.37.4/drivers/cpufreq/Kconfig
+===================================================================
+--- cm-kernel-2.6.37.4.orig/drivers/cpufreq/Kconfig	2012-06-25 20:31:49.259399000 -0700
++++ cm-kernel-2.6.37.4/drivers/cpufreq/Kconfig	2012-07-04 23:38:56.677113000 -0700
+@@ -206,4 +206,9 @@
+ 
+ 	  If in doubt, say N.
+ 
++config CPU_FREQ_GOV_IPC
++	tristate "'IPC' cpufreq policy governor"
++	help
++	  'IPC' - This driver adds a dynamic cpufreq policy governor
++
+ endif	# CPU_FREQ
+Index: cm-kernel-2.6.37.4/drivers/cpufreq/Makefile
+===================================================================
+--- cm-kernel-2.6.37.4.orig/drivers/cpufreq/Makefile	2012-06-25 20:31:49.259760000 -0700
++++ cm-kernel-2.6.37.4/drivers/cpufreq/Makefile	2012-07-04 23:39:29.429402000 -0700
+@@ -10,6 +10,7 @@
+ obj-$(CONFIG_CPU_FREQ_GOV_ONDEMAND)	+= cpufreq_ondemand.o
+ obj-$(CONFIG_CPU_FREQ_GOV_CONSERVATIVE)	+= cpufreq_conservative.o
+ obj-$(CONFIG_CPU_FREQ_GOV_INTERACTIVE)	+= cpufreq_interactive.o
++obj-$(CONFIG_CPU_FREQ_GOV_IPC)		+= cpufreq_ipc.o
+ 
+ # CPUfreq cross-arch helpers
+ obj-$(CONFIG_CPU_FREQ_TABLE)		+= freq_table.o
